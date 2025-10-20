@@ -1,0 +1,8 @@
+{
+	"AWS_ACCESS_KEY_ID": "AAA",
+	"AWS_SECRET_ACCESS_KEY": "AAA",
+	"SEC_UPL_KEE": "AAA",
+	"AWS_LINK": "http://url",
+	"IMG_DIR": "/loc/",
+	"EXTRA_STRG": "/mnt/FLDR"
+}
