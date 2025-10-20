@@ -1,0 +1,89 @@
+# Node modules (always ignore)
+node_modules/
+
+# Build output
+dist/
+build/
+out/
+.next/                 # Next.js
+.nuxt/                 # Nuxt.js
+.parcel-cache/
+.cache/
+.vite/                 # vite cache
+.esbuild/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime files / PIDs
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# dotenv environment files (often contain secrets)
+.env
+.env.*.local
+.env.local
+.env.*.secret
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor directories and files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Mac/Linux trash, thumbnails
+.Trashes
+._*
+
+# Debug history
+.node_repl_history
+
+# Yarn PnP
+.pnp.*
+ .pnp.js
+
+# Misc caches
+.cache
+.cypress/
+coverage/
+nyc_output/
+
+# TypeScript
+*.tsbuildinfo
+
+# ESLint / stylelint cache
+.eslintcache
+.stylelintcache
+
+# Test coverage and temp
+coverage/
+test-results/
+*.lcov
+
+# Certificates / keys (if any)
+*.pem
+*.key
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+
+# Optional: ignore local build artifacts from various bundlers
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+
+# Optional: ignore compiled CSS/JS (if you don't want compiled assets in git)
+public/assets/
+assets/
