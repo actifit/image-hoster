@@ -1,8 +1,11 @@
 {
-	"AWS_ACCESS_KEY_ID": "AAA",
-	"AWS_SECRET_ACCESS_KEY": "AAA",
 	"SEC_UPL_KEE": "AAA",
-	"AWS_LINK": "http://url",
-	"IMG_DIR": "/loc/",
-	"EXTRA_STRG": "/mnt/FLDR"
+	"SEC_UPL_KEE_LEG": "AAA",
+	"IMG_DIR": "/loadedimgs/",
+	"EXTRA_STRG": "/mnt/VOLUME_MOUNT",
+	"OBJ_ENDPOINT": "https://hel1.your-objectstorage.com",
+	"OBJ_REGION": "hel1",
+	"OBJ_BUCKET": "your-bucket-name",
+	"OBJ_KEY": "AAA",
+	"OBJ_SECRET": "AAA"
 }
