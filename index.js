@@ -3,10 +3,10 @@ const express = require('express');
 //to reactivate import mode, adjust package.json to include under main node:
 //"type": "module", 
 
-const fetch = require('node-fetch');
+//const fetch = require('node-fetch');
 //var Request = require("request");
 
-const axios = require('axios');
+//const axios = require('axios');
 const sharp = require('sharp');
 
 const PORT = process.env.PORT || 80
@@ -14,7 +14,7 @@ const version = 0.1
 
 const fs = require("fs"); // Or `import fs from "fs";` with ESM
 const path = require('path');
-const S3 = require('aws-sdk').S3;
+//const S3 = require('aws-sdk').S3;
 
 
 //const fs = require("fs");
@@ -77,13 +77,14 @@ function loadConfig() {
 
 
 const secretKey = config.SEC_UPL_KEE;
+const secondSecretKey = config.SEC_UPL_KEE_LEG;
 //console.log(config.AWS_ACCESS_KEY_ID);
 //console.log(config.AWS_SECRET_ACCESS_KEY);
-let s3 = new S3({
+/*let s3 = new S3({
     accessKeyId: config.AWS_ACCESS_KEY_ID,
     secretAccessKey: config.AWS_SECRET_ACCESS_KEY,
     //region: config.AWS_REGION
-});
+});*/
 
 async function fetchMeta(imgParam){
 	let input = 'loadedimgs/'+imgParam;
@@ -97,11 +98,63 @@ async function fetchMeta(imgParam){
 function verifySecretKey(req, res, next) {
   const token = req.headers['authorization'];
 
-  if (token !== secretKey) {
+  if (token !== secretKey && token !== secondSecretKey) {
     return res.status(403).send('Unauthorized access. Invalid token.');
   }
 
   next();
+}
+
+// Helper: Universally handles image orientation for all formats.
+async function fixOrientationAndStripExif(filePath) {
+  try {
+    // 1. Read the original file into a buffer. This works for any format.
+    const originalBuffer = await fs.promises.readFile(filePath);
+
+    // 2. Get the image's true metadata from the buffer.
+    const metadata = await sharp(originalBuffer).metadata();
+
+    // 3. Check if an orientation tag exists and requires rotation.
+    //    (This tag is typically only found in JPEG and TIFF files).
+    if (!metadata.orientation || metadata.orientation === 1) {
+      // If orientation is normal or doesn't exist (e.g., for a PNG), do nothing.
+      console.log(`Image ${filePath} (format: ${metadata.format}) does not require rotation. File left untouched.`);
+      return {
+        rotated: false,
+        metadataBefore: metadata
+      };
+    }
+
+    // 4. If we get here, rotation IS required. Calculate the angle.
+    let rotationAngle = 0;
+    switch (metadata.orientation) {
+      case 3: rotationAngle = 180; break;
+      case 6: rotationAngle = 90; break;
+      case 8: rotationAngle = 270; break;
+    }
+    
+    console.log(`Image ${filePath} (format: ${metadata.format}) has orientation tag ${metadata.orientation}. Applying ${rotationAngle}-degree rotation.`);
+
+    // 5. Create a new buffer with the physically rotated image.
+    //    Sharp will automatically preserve the original format (JPEG, etc.).
+    const rotatedBuffer = await sharp(originalBuffer)
+      .rotate(rotationAngle)
+      .toBuffer();
+
+    // 6. Overwrite the original file with the new, corrected buffer.
+    await fs.promises.writeFile(filePath, rotatedBuffer);
+
+    console.log(`Successfully rotated and saved ${filePath}.`);
+
+    return {
+      rotated: true,
+      metadataBefore: metadata
+    };
+
+  } catch (err) {
+    console.error(`CRITICAL: An error occurred during orientation check for ${filePath}.`, err);
+    throw err;
+  }
 }
 
 
@@ -109,15 +162,38 @@ app.get('/', async function (req,res){
 	res.send('EHLO');
 })
 
-app.post('/upload', verifySecretKey, upload.single('image'), function (req, res) { 
+app.post('/upload', verifySecretKey, upload.single('image'), async function (req, res) { 
 	try { 
-		// File information available at req.file 
-		console.log(req.file); 
-		// Send response back to client 
-		res.status(200).send('Image uploaded successfully!'); 
-	} catch (err) { 
-		res.status(500).send('An error occurred while uploading the image.'); 
-	}
+    if (!req.file) {
+      return res.status(400).send('No file uploaded.');
+    }
+
+    const savedPath = req.file.path; // full path where multer saved the file
+    console.log('Uploaded file info:', req.file);
+
+    try {
+      const result = await fixOrientationAndStripExif(savedPath);
+      console.log('fixOrientationAndStripExif result:', result);
+      // Send response back to client 
+      return res.status(200).json({
+        message: 'Image uploaded and processed successfully!',
+        rotated: result.rotated,
+        originalMetadata: {
+          format: result.metadataBefore.format,
+          size: result.metadataBefore.size,
+          orientation: result.metadataBefore.orientation || 1
+        }
+      });
+    } catch (processingErr) {
+      console.error('Error processing image:', processingErr);
+      // Optionally return success for upload but warn about processing error:
+      return res.status(500).json({ message: 'Image uploaded but failed to process orientation/EXIF.', error: processingErr.message });
+    }
+
+  } catch (err) { 
+    console.error('Upload error:', err);
+    res.status(500).send('An error occurred while uploading the image.');
+  }
 });
 
 app.get('/fetchMeta/:imgParam', async function (req, res){
@@ -169,6 +245,7 @@ app.get('/deleteOrigin', async function (req, res){
 	});*/
 })
 
+/*
 async function deleteFileAWS(fileName){
 	console.log('deleting '+fileName);
 	let aws_params = {
@@ -178,7 +255,7 @@ async function deleteFileAWS(fileName){
 	let outc = await s3.deleteObject(aws_params).promise();
 	//console.log(outc);
 	console.log('done');
-}
+}*/
 
 app.get('/:imgParam', async function (req, res){
 	console.log(req.params.imgParam);
@@ -196,6 +273,10 @@ app.get('/:imgParam', async function (req, res){
 		res.sendFile(extraStoragePath + imagesDir + req.params.imgParam);
 		return;		
 	}else{
+		res.send({error:'no match'});
+		return;
+	}
+	/*else{
 		//attempt to grab image from AWS
 
 		const url = awsLink + req.params.imgParam;
@@ -240,7 +321,7 @@ app.get('/:imgParam', async function (req, res){
 			});
 		
 	
-	}
+	}*/
 
 })
 
