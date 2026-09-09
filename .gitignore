@@ -137,3 +137,15 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# --- application specific ---
+
+# Runtime secrets (AWS/object-storage keys, upload tokens).
+# Use sample.config.json as the template.
+config.json
+
+# Uploaded images live on disk alongside the app; never track them.
+loadedimgs/
+
+# Local code backups taken before deploys
+*.tar.gz

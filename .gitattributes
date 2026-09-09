@@ -1,0 +1,7 @@
+# Deployed to Linux; keep LF in the working tree on every platform.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
