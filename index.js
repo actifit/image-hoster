@@ -308,10 +308,16 @@ app.get('/:imgParam', async function (req, res){
 		return res.send({error:'no match'});
 	}
 
+	//content type is set explicitly rather than left to sendFile: some stored
+	//images have no extension, and sendFile would label those
+	//application/octet-stream, which makes browsers download instead of render.
+	const contentType = contentTypeFor(imgName);
+
 	//tier 1: local disk
 	const localPath = __dirname + imagesDir + imgName;
 	if (fs.existsSync(localPath)) {
 		res.set('Cache-Control', CACHE_CONTROL);
+		res.type(contentType);
 		return res.sendFile(localPath);
 	}
 
@@ -319,6 +325,7 @@ app.get('/:imgParam', async function (req, res){
 	const volumePath = extraStoragePath + imagesDir + imgName;
 	if (fs.existsSync(volumePath)) {
 		res.set('Cache-Control', CACHE_CONTROL);
+		res.type(contentType);
 		return res.sendFile(volumePath);
 	}
 
@@ -331,7 +338,7 @@ app.get('/:imgParam', async function (req, res){
 				Key: imgName
 			}).promise();
 			res.set('Cache-Control', CACHE_CONTROL);
-			res.type(contentTypeFor(imgName));
+			res.type(contentType);
 			return res.send(obj.Body);
 		} catch (err) {
 			if (err.code !== 'NoSuchKey' && err.statusCode !== 404) {
