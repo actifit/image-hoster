@@ -48,24 +48,46 @@ function readExifOrientation(exif) {
 //The EXIF APP1 payload ("Exif\0\0..."), found by walking the JPEG's marker
 //segments. Works on just the first bytes of a file, so a bucket object can be
 //checked from a ranged download. Returns null for non-JPEGs or when there is
-//no EXIF segment before the image data.
+//no EXIF segment before the image data, and undefined when `buf` ends before
+//that could be decided (large segments such as an ICC profile come first).
 function exifFromJpegHeader(buf) {
 	if (!Buffer.isBuffer(buf) || buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) {
 		return null;
 	}
 	let at = 2;
-	while (at + 4 <= buf.length && buf[at] === 0xff) {
+	for (;;) {
+		while (at + 1 < buf.length && buf[at] === 0xff && buf[at + 1] === 0xff) {
+			at++; //fill bytes may pad a marker
+		}
+		if (at + 2 > buf.length) {
+			return undefined;
+		}
+		if (buf[at] !== 0xff) {
+			return null; //not a marker: corrupt header
+		}
 		const marker = buf[at + 1];
 		if (marker === 0xda || marker === 0xd9) {
 			return null; //image data or end of image: no EXIF before it
 		}
+		if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+			at += 2; //standalone markers carry no length
+			continue;
+		}
+		if (at + 4 > buf.length) {
+			return undefined;
+		}
 		const length = buf.readUInt16BE(at + 2);
-		if (marker === 0xe1 && buf.toString('latin1', at + 4, at + 10) === 'Exif\0\0') {
+		if (length < 2) {
+			return null; //corrupt length
+		}
+		if (marker === 0xe1 && at + 10 <= buf.length && buf.toString('latin1', at + 4, at + 10) === 'Exif\0\0') {
 			return buf.slice(at + 4, Math.min(at + 2 + length, buf.length));
+		}
+		if (marker === 0xe1 && at + 10 > buf.length) {
+			return undefined; //an APP1 segment whose type is cut off
 		}
 		at += 2 + length;
 	}
-	return null;
 }
 
 //The same mapping sharp uses for auto-orientation: rotate clockwise first, then
@@ -97,7 +119,9 @@ async function uprightBuffer(input, orientation) {
 	let img = sharp(input).rotate(t.angle);
 	if (t.flip) img = img.flip();
 	if (t.flop) img = img.flop();
-	return img.toBuffer();
+	//quality 90 instead of sharp's default 80, to limit generation loss on
+	//originals; force:false keeps non-JPEG input in its own format
+	return img.jpeg({ quality: 90, force: false }).toBuffer();
 }
 
 module.exports = { readExifOrientation, exifFromJpegHeader, imageOrientation, uprightBuffer };

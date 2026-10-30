@@ -119,5 +119,22 @@ test('exifFromJpegHeader returns null without EXIF or for non-JPEG input', async
 	assert.strictEqual(exifFromJpegHeader(Buffer.from('\x89PNG\r\n\x1a\n', 'latin1')), null);
 	assert.strictEqual(exifFromJpegHeader(Buffer.from([0xff, 0xd8])), null);
 	assert.strictEqual(exifFromJpegHeader(undefined), null);
-	assert.strictEqual(exifFromJpegHeader(Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0xff, 0xff])), null);
+	assert.strictEqual(exifFromJpegHeader(Buffer.from([0xff, 0xd8, 0x00, 0x00])), null);
+	assert.strictEqual(exifFromJpegHeader(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x01])), null);
+});
+
+test('exifFromJpegHeader skips fill bytes and markers without a length', async () => {
+	const jpeg = withExif(await baseJpeg(), 8, false);
+	const padded = Buffer.concat([jpeg.slice(0, 2), Buffer.from([0xff, 0xff, 0xff, 0xd0]), jpeg.slice(2)]);
+	assert.strictEqual(readExifOrientation(exifFromJpegHeader(padded)), 8);
+});
+
+test('exifFromJpegHeader says "unknown" when the header is cut before the EXIF', async () => {
+	const jpeg = withExif(await baseJpeg(), 6, true);
+	//a 70 KB APP2 (ICC) segment before the EXIF, as some phones write
+	const app2 = Buffer.concat([Buffer.from([0xff, 0xe2, 0xff, 0xff]), Buffer.alloc(65533)]);
+	const big = Buffer.concat([jpeg.slice(0, 2), app2, jpeg.slice(2)]);
+	assert.strictEqual(exifFromJpegHeader(big.slice(0, 65536)), undefined);
+	assert.strictEqual(readExifOrientation(exifFromJpegHeader(big)), 6);
+	assert.strictEqual(exifFromJpegHeader(Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0xff, 0xff])), undefined);
 });

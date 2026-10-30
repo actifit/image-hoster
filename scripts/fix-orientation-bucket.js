@@ -3,37 +3,44 @@
 //upright, with no metadata. Most images live only in the bucket, so this is the
 //main repair; scripts/fix-orientation.js covers files on local disk.
 //
-//Run from the app directory (it reads config.json):
+//Run from the app directory (it reads config.json). Run one instance at a time.
 //  node scripts/fix-orientation-bucket.js               dry run: list candidates
 //  node scripts/fix-orientation-bucket.js --apply       rewrite them
 //  --keys=FILE        only check these keys (one per line, first tab-separated
 //                     column), e.g. orientation-candidates.tsv from a dry run,
-//                     or orientation-errors.txt to retry failures
+//                     or a copy of orientation-errors.txt to retry failures
+//  --start-after=KEY  resume a full listing after this key
 //  --concurrency=N    parallel header checks (default 32)
 //
-//Each object is checked from its first 64 KB only. Before an object is
-//replaced, the original is copied to orient-backup/<key> in the same bucket
-//(the GET route never serves keys with a slash). A local copy in IMG_DIR, if
-//any, is rewritten too, first, since local disk is served before the bucket.
+//Each object is checked from its first 64 KB, or in full when its EXIF lies
+//further in. Before an object is replaced, the original is copied to
+//orient-backup/<key> in the same bucket, once: an existing backup is never
+//overwritten, so it always holds the true original. A local copy in IMG_DIR,
+//if any, is rewritten too, since local disk is served before the bucket.
 //
-//Output files, appended as the run goes so nothing is lost if it stops:
-//  orientation-candidates.tsv   key, orientation (every candidate found)
-//  fixed-orientation.txt        keys rewritten: purge these URLs from the CDN
-//  orientation-errors.txt       keys that failed: retry with --keys
+//Output files (in the current directory):
+//  orientation-candidates.tsv   dry run only: key, orientation (new each dry run)
+//  fixed-orientation.txt        appended: keys rewritten, purge these from the CDN
+//  orientation-errors.txt       new each run: keys that failed
 
 const fs = require('fs');
 const path = require('path');
+const sharp = require('sharp');
 const { readExifOrientation, exifFromJpegHeader, imageOrientation, uprightBuffer } = require('../orientation');
 const { errorText, replaceFile } = require('./replace-file');
 
-const USAGE = 'usage: node scripts/fix-orientation-bucket.js [--apply] [--keys=FILE] [--concurrency=N]';
+const USAGE = 'usage: node scripts/fix-orientation-bucket.js [--apply] [--keys=FILE] [--start-after=KEY] [--concurrency=N]';
 const CANDIDATES = 'orientation-candidates.tsv';
 const PURGE_LIST = 'fixed-orientation.txt';
 const ERRORS = 'orientation-errors.txt';
 const BACKUP_PREFIX = 'orient-backup/';
 const HEADER_BYTES = 65536;
 const CACHE_CONTROL = 'public, max-age=31536000, immutable';
-const FIX_CONCURRENCY = 4; //full-size decodes are memory heavy
+const FIX_CONCURRENCY = 2; //full-size decodes are memory and CPU heavy; the live app shares the box
+
+//leave CPU and memory for the live app
+sharp.cache(false);
+sharp.concurrency(1);
 
 function fail(message) {
 	console.error(message);
@@ -42,16 +49,23 @@ function fail(message) {
 }
 
 const flags = process.argv.slice(2);
-const known = /^--(apply|keys=.+|concurrency=\d+)$/;
+const known = /^--(apply|keys=.+|start-after=.+|concurrency=\d+)$/;
 const unknown = flags.filter(f => !known.test(f));
 if (unknown.length) fail('unknown option: ' + unknown.join(' '));
 const apply = flags.includes('--apply');
-const keysArg = flags.find(f => f.startsWith('--keys='));
-const keysFile = keysArg ? keysArg.slice(7) : null;
-const concArg = flags.find(f => f.startsWith('--concurrency='));
-const concurrency = concArg ? Number(concArg.slice(14)) : 32;
+const valueOf = (name) => {
+	const f = flags.find(a => a.startsWith('--' + name + '='));
+	return f ? f.slice(name.length + 3) : null;
+};
+const keysFile = valueOf('keys');
+const startAfter = valueOf('start-after');
+const concurrency = valueOf('concurrency') ? Number(valueOf('concurrency')) : 32;
 if (!(concurrency >= 1 && concurrency <= 256)) fail('--concurrency must be 1-256');
+if (keysFile && startAfter) fail('--keys and --start-after cannot be combined');
 if (keysFile && !fs.existsSync(keysFile)) fail('no such keys file: ' + keysFile);
+if (keysFile && path.resolve(keysFile) === path.resolve(ERRORS)) {
+	fail(ERRORS + ' is rewritten by each run; retry from a copy of it');
+}
 
 let config;
 try {
@@ -73,18 +87,24 @@ const s3 = new S3({
 	maxRetries: 5
 });
 const bucket = config.OBJ_BUCKET;
-const localDir = config.IMG_DIR ? path.join(process.cwd(), config.IMG_DIR) : null;
+const localDir = config.IMG_DIR ? path.resolve(process.cwd(), '.' + path.sep + config.IMG_DIR) : null;
+
+//read the whole keys file up front, without duplicates: two workers on the same
+//key could otherwise race and back up an already-fixed image
+const keyList = keysFile ? Array.from(new Set(
+	fs.readFileSync(keysFile, 'utf8').split('\n').map(l => l.split('\t')[0].trim()).filter(Boolean)
+)) : null;
 
 //fail now rather than after objects were rewritten and could not be listed
-for (const file of [CANDIDATES, ERRORS].concat(apply ? [PURGE_LIST] : [])) {
-	try {
-		fs.closeSync(fs.openSync(file, 'a'));
-	} catch (err) {
-		fail('cannot write ' + file + ': ' + err.message);
-	}
+try {
+	fs.writeFileSync(ERRORS, '');
+	if (!apply) fs.writeFileSync(CANDIDATES, '');
+	if (apply) fs.closeSync(fs.openSync(PURGE_LIST, 'a'));
+} catch (err) {
+	fail('cannot write output files: ' + err.message);
 }
 
-const stats = { checked: 0, empty: 0, notJpeg: 0, noExif: 0, upright: 0, needsFix: 0, fixed: 0, localFixed: 0, errors: 0 };
+const stats = { checked: 0, empty: 0, notJpeg: 0, noExif: 0, fullChecked: 0, upright: 0, needsFix: 0, fixed: 0, skipped: 0, backupKept: 0, localFixed: 0, errors: 0 };
 
 function logError(key, err) {
 	stats.errors++;
@@ -92,18 +112,31 @@ function logError(key, err) {
 	fs.appendFileSync(ERRORS, key + '\n');
 }
 
-//a tiny semaphore so header checks stay fast while full rewrites are capped
-let fixSlots = FIX_CONCURRENCY;
-const fixQueue = [];
+//caps full rewrites; a released slot goes straight to the next waiter
+let freeSlots = FIX_CONCURRENCY;
+const waiting = [];
 async function withFixSlot(fn) {
-	if (fixSlots === 0) await new Promise(resolve => fixQueue.push(resolve));
-	fixSlots--;
+	if (freeSlots > 0) {
+		freeSlots--;
+	} else {
+		await new Promise(resolve => waiting.push(resolve));
+	}
 	try {
 		return await fn();
 	} finally {
-		fixSlots++;
-		const next = fixQueue.shift();
+		const next = waiting.shift();
 		if (next) next();
+		else freeSlots++;
+	}
+}
+
+async function exists(key) {
+	try {
+		await s3.headObject({ Bucket: bucket, Key: key }).promise();
+		return true;
+	} catch (err) {
+		if (err.code === 'NotFound' || err.statusCode === 404) return false;
+		throw err;
 	}
 }
 
@@ -112,32 +145,45 @@ async function fixObject(key) {
 	//full check: sharp's own reading, falling back to the raw EXIF bytes
 	const { orientation } = await imageOrientation(obj.Body);
 	const upright = await uprightBuffer(obj.Body, orientation);
-	if (!upright) return;
+	if (!upright) {
+		stats.skipped++;
+		console.log('skipped ' + key + ': already upright on full check');
+		return;
+	}
 
-	//listed first: once rewritten, a rerun skips it, so it must never be missing
+	//1. keep the original, once. An existing backup is the true original from an
+	//   earlier attempt, and copying again could replace it with a fixed image.
+	if (await exists(BACKUP_PREFIX + key)) {
+		stats.backupKept++;
+	} else {
+		await s3.copyObject({
+			Bucket: bucket,
+			Key: BACKUP_PREFIX + key,
+			CopySource: bucket + '/' + encodeURIComponent(key)
+		}).promise();
+	}
+
+	//2. listed before anything is rewritten, so it can never miss the CDN purge
 	fs.appendFileSync(PURGE_LIST, key + '\n');
 
-	//local disk is served before the bucket, so fix the local copy first; if the
-	//bucket step then fails, a rerun still finds the bucket copy sideways
+	//3. local disk is served before the bucket; if the bucket step then fails,
+	//   a rerun still finds the bucket copy sideways
 	if (localDir) {
 		const file = path.join(localDir, key);
-		if (path.dirname(file) === path.resolve(localDir) && fs.existsSync(file)) {
+		if (path.dirname(file) === localDir && fs.existsSync(file)) {
 			replaceFile(file, upright, fs.statSync(file));
 			stats.localFixed++;
 		}
 	}
 
-	await s3.copyObject({
-		Bucket: bucket,
-		Key: BACKUP_PREFIX + key,
-		CopySource: bucket + '/' + encodeURIComponent(key)
-	}).promise();
+	//4. the bucket copy
 	await s3.putObject({
 		Bucket: bucket,
 		Key: key,
 		Body: upright,
 		ContentType: obj.ContentType || 'image/jpeg',
-		CacheControl: CACHE_CONTROL
+		CacheControl: CACHE_CONTROL,
+		Metadata: obj.Metadata
 	}).promise();
 	stats.fixed++;
 }
@@ -145,14 +191,30 @@ async function fixObject(key) {
 async function check(key) {
 	if (key.startsWith(BACKUP_PREFIX)) return;
 	try {
-		const head = await s3.getObject({ Bucket: bucket, Key: key, Range: 'bytes=0-' + (HEADER_BYTES - 1) }).promise();
+		let head;
+		try {
+			head = await s3.getObject({ Bucket: bucket, Key: key, Range: 'bytes=0-' + (HEADER_BYTES - 1) }).promise();
+		} catch (err) {
+			//a ranged read of a 0-byte object fails with InvalidRange
+			if (err.code === 'InvalidRange' || err.statusCode === 416) {
+				stats.empty++;
+				return;
+			}
+			throw err;
+		}
 		stats.checked++;
-		const body = head.Body;
+		let body = head.Body;
 		if (body.length < 2 || body[0] !== 0xff || body[1] !== 0xd8) {
 			stats.notJpeg++;
 			return;
 		}
-		const exif = exifFromJpegHeader(body);
+		let exif = exifFromJpegHeader(body);
+		if (exif === undefined && body.length >= HEADER_BYTES) {
+			//EXIF may sit behind large segments: read the whole file
+			stats.fullChecked++;
+			body = (await s3.getObject({ Bucket: bucket, Key: key }).promise()).Body;
+			exif = exifFromJpegHeader(body);
+		}
 		if (!exif) {
 			stats.noExif++;
 			return;
@@ -163,33 +225,43 @@ async function check(key) {
 			return;
 		}
 		stats.needsFix++;
-		fs.appendFileSync(CANDIDATES, key + '\t' + orientation + '\n');
-		if (apply) {
-			await withFixSlot(() => fixObject(key));
-		}
-	} catch (err) {
-		//a ranged read of a 0-byte object fails with InvalidRange
-		if (err.code === 'InvalidRange') {
-			stats.empty++;
+		if (!apply) {
+			fs.appendFileSync(CANDIDATES, key + '\t' + orientation + '\n');
 			return;
 		}
+		await withFixSlot(() => fixObject(key));
+	} catch (err) {
 		logError(key, err);
 	}
 }
 
-//yields keys from the keys file, or from a full bucket listing page by page
+let lastListed = null;
+let listError = null;
+
+//yields keys from the keys file, or from a full bucket listing page by page.
+//A failed listing page stops the listing; work already started still finishes.
 async function* keys() {
-	if (keysFile) {
-		for (const line of fs.readFileSync(keysFile, 'utf8').split('\n')) {
-			const key = line.split('\t')[0].trim();
-			if (key) yield key;
-		}
+	if (keyList) {
+		yield* keyList;
 		return;
 	}
 	let token;
+	let first = true;
 	do {
-		const page = await s3.listObjectsV2({ Bucket: bucket, ContinuationToken: token }).promise();
+		let page;
+		try {
+			page = await s3.listObjectsV2({
+				Bucket: bucket,
+				ContinuationToken: token,
+				StartAfter: first && startAfter ? startAfter : undefined
+			}).promise();
+		} catch (err) {
+			listError = err;
+			return;
+		}
+		first = false;
 		for (const o of page.Contents || []) {
+			lastListed = o.Key;
 			if (o.Size === 0) {
 				stats.empty++; //nothing to read or fix
 				continue;
@@ -211,12 +283,16 @@ async function main() {
 			if (next.done) return;
 			seen++;
 			if (seen % 10000 === 0) {
-				console.log('progress: ' + seen + ' keys, ' + Math.round((Date.now() - started) / 1000) + 's ' + JSON.stringify(stats));
+				console.log('progress: ' + seen + ' keys, ' + Math.round((Date.now() - started) / 1000) + 's, last listed ' + lastListed + ' ' + JSON.stringify(stats));
 			}
 			await check(next.value);
 		}
 	}
 	await Promise.all(Array.from({ length: concurrency }, worker));
+	if (listError) {
+		console.error('listing stopped early (' + errorText(listError) + '). Resume with --start-after=' + lastListed);
+		process.exitCode = 1;
+	}
 	console.log((apply ? 'done ' : 'dry run done ') + JSON.stringify(stats));
 	if (stats.errors > 0) process.exitCode = 1;
 }
