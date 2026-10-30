@@ -42,7 +42,6 @@ loadConfig();
 const awsLink = config.AWS_LINK; 
 const imagesDir = config.IMG_DIR;
 
-const extraStoragePath = config.EXTRA_STRG;
 
 // Multer configuration for storing uploaded images
 const storage = multer.diskStorage({ 
@@ -80,8 +79,8 @@ function loadConfig() {
 const secretKey = config.SEC_UPL_KEE;
 const secondSecretKey = config.SEC_UPL_KEE_LEG;
 
-//object storage (Hetzner, S3-compatible) acts as the third storage tier, behind
-//the local disk and the mounted volume. Stays disabled unless fully configured,
+//object storage (Hetzner, S3-compatible) is the second storage tier, behind
+//the local disk. Stays disabled unless fully configured,
 //so the app keeps working exactly as before if the config is absent.
 const objectStorageEnabled = Boolean(
 	config.OBJ_ENDPOINT && config.OBJ_BUCKET && config.OBJ_KEY && config.OBJ_SECRET
@@ -313,15 +312,8 @@ app.get('/:imgParam', async function (req, res){
 		return res.sendFile(localPath);
 	}
 
-	//tier 2: mounted volume
-	const volumePath = extraStoragePath + imagesDir + imgName;
-	if (fs.existsSync(volumePath)) {
-		res.set('Cache-Control', CACHE_CONTROL);
-		res.type(contentType);
-		return res.sendFile(volumePath);
-	}
-
-	//tier 3: object storage. Server-to-bucket traffic stays inside the Hetzner
+	//tier 2: object storage, which also holds everything that used to live on the
+	//old mounted volume. Server-to-bucket traffic stays inside the Hetzner
 	//network zone, so it is free and only costs one internal round trip.
 	if (s3) {
 		try {

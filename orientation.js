@@ -45,6 +45,29 @@ function readExifOrientation(exif) {
 	return undefined;
 }
 
+//The EXIF APP1 payload ("Exif\0\0..."), found by walking the JPEG's marker
+//segments. Works on just the first bytes of a file, so a bucket object can be
+//checked from a ranged download. Returns null for non-JPEGs or when there is
+//no EXIF segment before the image data.
+function exifFromJpegHeader(buf) {
+	if (!Buffer.isBuffer(buf) || buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) {
+		return null;
+	}
+	let at = 2;
+	while (at + 4 <= buf.length && buf[at] === 0xff) {
+		const marker = buf[at + 1];
+		if (marker === 0xda || marker === 0xd9) {
+			return null; //image data or end of image: no EXIF before it
+		}
+		const length = buf.readUInt16BE(at + 2);
+		if (marker === 0xe1 && buf.toString('latin1', at + 4, at + 10) === 'Exif\0\0') {
+			return buf.slice(at + 4, Math.min(at + 2 + length, buf.length));
+		}
+		at += 2 + length;
+	}
+	return null;
+}
+
 //The same mapping sharp uses for auto-orientation: rotate clockwise first, then
 //mirror. flip mirrors top to bottom, flop mirrors left to right.
 const TRANSFORMS = {
@@ -77,4 +100,4 @@ async function uprightBuffer(input, orientation) {
 	return img.toBuffer();
 }
 
-module.exports = { readExifOrientation, imageOrientation, uprightBuffer };
+module.exports = { readExifOrientation, exifFromJpegHeader, imageOrientation, uprightBuffer };

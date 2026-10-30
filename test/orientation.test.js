@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const sharp = require('sharp');
-const { readExifOrientation, imageOrientation, uprightBuffer } = require('../orientation');
+const { readExifOrientation, exifFromJpegHeader, imageOrientation, uprightBuffer } = require('../orientation');
 
 //A 40x20 image with four differently coloured quadrants, so any rotation or
 //mirror shows up as colours in the wrong corners.
@@ -97,4 +97,27 @@ test('readExifOrientation ignores missing, short and malformed input', () => {
 	const app1 = exifApp1(6, false).slice(4);
 	assert.strictEqual(readExifOrientation(app1.slice(0, app1.length - 8)), undefined);
 	assert.strictEqual(readExifOrientation(app1), 6);
+});
+
+test('exifFromJpegHeader finds EXIF after other segments and in a truncated header', async () => {
+	const jpeg = withExif(await baseJpeg(), 6, true); //EXIF right after SOI
+	const exif = exifFromJpegHeader(jpeg);
+	assert.ok(exif && exif.slice(0, 6).toString('latin1') === 'Exif\0\0');
+	assert.strictEqual(readExifOrientation(exif), 6);
+
+	//EXIF after an APP0 segment
+	const app0 = Buffer.from([0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0]);
+	const later = Buffer.concat([jpeg.slice(0, 2), app0, jpeg.slice(2)]);
+	assert.strictEqual(readExifOrientation(exifFromJpegHeader(later)), 6);
+
+	//only the first bytes, as from a ranged download
+	assert.strictEqual(readExifOrientation(exifFromJpegHeader(later.slice(0, 120))), 6);
+});
+
+test('exifFromJpegHeader returns null without EXIF or for non-JPEG input', async () => {
+	assert.strictEqual(exifFromJpegHeader(await baseJpeg()), null);
+	assert.strictEqual(exifFromJpegHeader(Buffer.from('\x89PNG\r\n\x1a\n', 'latin1')), null);
+	assert.strictEqual(exifFromJpegHeader(Buffer.from([0xff, 0xd8])), null);
+	assert.strictEqual(exifFromJpegHeader(undefined), null);
+	assert.strictEqual(exifFromJpegHeader(Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0xff, 0xff])), null);
 });

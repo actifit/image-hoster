@@ -152,3 +152,5 @@ loadedimgs/
 
 # Output of scripts/fix-orientation.js
 fixed-orientation.txt
+orientation-candidates.tsv
+orientation-errors.txt

@@ -7,8 +7,8 @@
 //  --bucket          also replace the object-storage copy (needs config.json in cwd)
 //  --since=YYYY-MM-DD  skip files last modified before that date (UTC midnight)
 //
-//Pass every storage directory: the local image dir and the mounted volume.
-//Objects that exist only in the bucket are not scanned.
+//This covers images on local disk. Images that exist only in the bucket are
+//handled by scripts/fix-orientation-bucket.js.
 //
 //Each rewritten name is appended to fixed-orientation.txt as soon as it is
 //written, so the CDN cache can be purged even if the run stops part way:
@@ -17,6 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const { imageOrientation, uprightBuffer } = require('../orientation');
+const { errorText, replaceFile } = require('./replace-file');
 
 const USAGE = 'usage: node scripts/fix-orientation.js [--apply] [--bucket] [--since=YYYY-MM-DD] <dir> [<dir> ...]';
 const PURGE_LIST = 'fixed-orientation.txt';
@@ -77,11 +78,6 @@ if (apply) {
 	}
 }
 
-//AWS HEAD errors have no message, only a code/status
-function errorText(err) {
-	return err.message || err.code || ('HTTP ' + err.statusCode);
-}
-
 async function bucketHas(key) {
 	try {
 		await s3.headObject({ Bucket: bucket, Key: key }).promise();
@@ -94,7 +90,7 @@ async function bucketHas(key) {
 
 //The bucket copy is replaced before the local file: once the local file is
 //upright, a rerun skips it, so a bucket failure after that could never be retried.
-async function rewrite(dir, name, file, st, upright, stats) {
+async function rewrite(name, file, st, upright, stats) {
 	if (s3 && await bucketHas(name)) {
 		await s3.putObject({
 			Bucket: bucket,
@@ -110,23 +106,7 @@ async function rewrite(dir, name, file, st, upright, stats) {
 	//missing from the list would never be purged. Listing an unfixed name is harmless.
 	fs.appendFileSync(PURGE_LIST, name + '\n');
 
-	//leading dot: safeImageName rejects it, so the GET route never serves the temp file
-	const tmp = path.join(dir, '.orient-tmp-' + process.pid);
-	try {
-		fs.writeFileSync(tmp, upright);
-		fs.chmodSync(tmp, st.mode & 0o7777); //writeFileSync's mode would be masked by umask
-		try {
-			fs.chownSync(tmp, st.uid, st.gid);
-		} catch (err) {
-			if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
-				console.warn('warning: could not keep the owner of ' + file + ' (' + errorText(err) + ')');
-			}
-		}
-		fs.renameSync(tmp, file);
-	} catch (err) {
-		try { fs.unlinkSync(tmp); } catch (e) { /* already gone */ }
-		throw err;
-	}
+	replaceFile(file, upright, st);
 	stats.fixed++;
 }
 
@@ -162,7 +142,7 @@ async function main() {
 				stats.needsFix++;
 				console.log((apply ? 'fixing ' : 'would fix ') + file + ' (orientation ' + orientation + (metadata.orientation ? '' : ', unreadable EXIF') + ')');
 				if (!apply) continue;
-				await rewrite(dir, name, file, st, await uprightBuffer(input, orientation), stats);
+				await rewrite(name, file, st, await uprightBuffer(input, orientation), stats);
 			} catch (err) {
 				stats.errors++;
 				console.error('error on ' + file + ': ' + errorText(err));
