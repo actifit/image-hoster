@@ -84,7 +84,7 @@ for (const file of [CANDIDATES, ERRORS].concat(apply ? [PURGE_LIST] : [])) {
 	}
 }
 
-const stats = { checked: 0, notJpeg: 0, noExif: 0, upright: 0, needsFix: 0, fixed: 0, localFixed: 0, errors: 0 };
+const stats = { checked: 0, empty: 0, notJpeg: 0, noExif: 0, upright: 0, needsFix: 0, fixed: 0, localFixed: 0, errors: 0 };
 
 function logError(key, err) {
 	stats.errors++;
@@ -168,6 +168,11 @@ async function check(key) {
 			await withFixSlot(() => fixObject(key));
 		}
 	} catch (err) {
+		//a ranged read of a 0-byte object fails with InvalidRange
+		if (err.code === 'InvalidRange') {
+			stats.empty++;
+			return;
+		}
 		logError(key, err);
 	}
 }
@@ -184,7 +189,13 @@ async function* keys() {
 	let token;
 	do {
 		const page = await s3.listObjectsV2({ Bucket: bucket, ContinuationToken: token }).promise();
-		for (const o of page.Contents || []) yield o.Key;
+		for (const o of page.Contents || []) {
+			if (o.Size === 0) {
+				stats.empty++; //nothing to read or fix
+				continue;
+			}
+			yield o.Key;
+		}
 		token = page.NextContinuationToken;
 	} while (token);
 }
