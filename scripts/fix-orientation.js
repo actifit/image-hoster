@@ -47,7 +47,12 @@ for (const dir of dirs) {
 let s3 = null;
 let bucket = null;
 if (useBucket) {
-	const config = JSON.parse(fs.readFileSync('config.json'));
+	let config;
+	try {
+		config = JSON.parse(fs.readFileSync('config.json'));
+	} catch (err) {
+		fail('--bucket needs a readable config.json in the current directory: ' + err.message);
+	}
 	if (!(config.OBJ_ENDPOINT && config.OBJ_BUCKET && config.OBJ_KEY && config.OBJ_SECRET)) {
 		fail('--bucket needs OBJ_ENDPOINT, OBJ_BUCKET, OBJ_KEY and OBJ_SECRET in config.json');
 	}
@@ -61,6 +66,20 @@ if (useBucket) {
 		signatureVersion: 'v4'
 	});
 	bucket = config.OBJ_BUCKET;
+}
+
+//fail now rather than after files were rewritten and could not be listed
+if (apply) {
+	try {
+		fs.closeSync(fs.openSync(PURGE_LIST, 'a'));
+	} catch (err) {
+		fail('cannot write ' + PURGE_LIST + ': ' + err.message);
+	}
+}
+
+//AWS HEAD errors have no message, only a code/status
+function errorText(err) {
+	return err.message || err.code || ('HTTP ' + err.statusCode);
 }
 
 async function bucketHas(key) {
@@ -87,14 +106,21 @@ async function rewrite(dir, name, file, st, upright, stats) {
 		stats.bucketFixed++;
 	}
 
+	//listed before the rename: once renamed, a rerun skips the file, so a name
+	//missing from the list would never be purged. Listing an unfixed name is harmless.
+	fs.appendFileSync(PURGE_LIST, name + '\n');
+
 	//leading dot: safeImageName rejects it, so the GET route never serves the temp file
-	const tmp = path.join(dir, '.' + name + '.orient-tmp');
+	const tmp = path.join(dir, '.orient-tmp-' + process.pid);
 	try {
-		fs.writeFileSync(tmp, upright, { mode: st.mode });
+		fs.writeFileSync(tmp, upright);
+		fs.chmodSync(tmp, st.mode & 0o7777); //writeFileSync's mode would be masked by umask
 		try {
 			fs.chownSync(tmp, st.uid, st.gid);
 		} catch (err) {
-			//only root can chown; otherwise the runner already owns the new file
+			if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+				console.warn('warning: could not keep the owner of ' + file + ' (' + errorText(err) + ')');
+			}
 		}
 		fs.renameSync(tmp, file);
 	} catch (err) {
@@ -102,14 +128,13 @@ async function rewrite(dir, name, file, st, upright, stats) {
 		throw err;
 	}
 	stats.fixed++;
-	fs.appendFileSync(PURGE_LIST, name + '\n');
 }
 
 async function main() {
 	if (s3) {
 		await s3.headBucket({ Bucket: bucket }).promise();
 	}
-	const stats = { scanned: 0, needsFix: 0, fixed: 0, bucketFixed: 0, errors: 0 };
+	const stats = { scanned: 0, notImage: 0, needsFix: 0, fixed: 0, bucketFixed: 0, errors: 0 };
 	for (const dir of dirs) {
 		for (const name of fs.readdirSync(dir)) {
 			if (name.startsWith('.')) continue;
@@ -124,7 +149,14 @@ async function main() {
 			stats.scanned++;
 			try {
 				const input = fs.readFileSync(file);
-				const { metadata, orientation } = await imageOrientation(input);
+				let found;
+				try {
+					found = await imageOrientation(input);
+				} catch (err) {
+					stats.notImage++;
+					continue;
+				}
+				const { metadata, orientation } = found;
 				//other formats are fixed on upload; only JPEGs showed the broken EXIF
 				if (metadata.format !== 'jpeg' || orientation === 1) continue;
 				stats.needsFix++;
@@ -133,11 +165,14 @@ async function main() {
 				await rewrite(dir, name, file, st, await uprightBuffer(input, orientation), stats);
 			} catch (err) {
 				stats.errors++;
-				console.error('error on ' + file + ': ' + err.message);
+				console.error('error on ' + file + ': ' + errorText(err));
 			}
 		}
 	}
 	console.log(JSON.stringify(stats));
+	if (stats.errors > 0) {
+		process.exitCode = 1;
+	}
 }
 
 main().catch(err => {
