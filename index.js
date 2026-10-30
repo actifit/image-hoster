@@ -8,6 +8,7 @@ const express = require('express');
 
 //const axios = require('axios');
 const sharp = require('sharp');
+const { imageOrientation, uprightBuffer } = require('./orientation');
 
 const PORT = process.env.PORT || 80
 const version = 0.1
@@ -181,43 +182,34 @@ async function fixOrientationAndStripExif(filePath) {
     // 1. Read the original file into a buffer. This works for any format.
     const originalBuffer = await fs.promises.readFile(filePath);
 
-    // 2. Get the image's true metadata from the buffer.
-    const metadata = await sharp(originalBuffer).metadata();
+    // 2. Read the orientation, falling back to the raw EXIF bytes when sharp
+    //    cannot parse the EXIF block (see orientation.js).
+    const { metadata, orientation } = await imageOrientation(originalBuffer);
 
-    // 3. Check if an orientation tag exists and requires rotation.
-    //    (This tag is typically only found in JPEG and TIFF files).
-    if (!metadata.orientation || metadata.orientation === 1) {
-      // If orientation is normal or doesn't exist (e.g., for a PNG), do nothing.
+    // 3. Physically rotate/mirror it upright. null means it already is.
+    //    Sharp keeps the original format (JPEG, etc.).
+    const rotatedBuffer = await uprightBuffer(originalBuffer, orientation);
+    if (!rotatedBuffer) {
       console.log(`Image ${filePath} (format: ${metadata.format}) does not require rotation. File left untouched.`);
       return {
         rotated: false,
+        orientation: orientation,
         metadataBefore: metadata
       };
     }
-
-    // 4. If we get here, rotation IS required. Calculate the angle.
-    let rotationAngle = 0;
-    switch (metadata.orientation) {
-      case 3: rotationAngle = 180; break;
-      case 6: rotationAngle = 90; break;
-      case 8: rotationAngle = 270; break;
+    if (!metadata.orientation) {
+      console.log(`Image ${filePath}: sharp could not read the EXIF block; orientation ${orientation} read from raw EXIF.`);
     }
-    
-    console.log(`Image ${filePath} (format: ${metadata.format}) has orientation tag ${metadata.orientation}. Applying ${rotationAngle}-degree rotation.`);
+    console.log(`Image ${filePath} (format: ${metadata.format}) has orientation tag ${orientation}. Rotating upright.`);
 
-    // 5. Create a new buffer with the physically rotated image.
-    //    Sharp will automatically preserve the original format (JPEG, etc.).
-    const rotatedBuffer = await sharp(originalBuffer)
-      .rotate(rotationAngle)
-      .toBuffer();
-
-    // 6. Overwrite the original file with the new, corrected buffer.
+    // 4. Overwrite the original file with the new, corrected buffer.
     await fs.promises.writeFile(filePath, rotatedBuffer);
 
     console.log(`Successfully rotated and saved ${filePath}.`);
 
     return {
       rotated: true,
+      orientation: orientation,
       metadataBefore: metadata
     };
 
@@ -258,7 +250,7 @@ app.post('/upload', verifySecretKey, upload.single('image'), async function (req
         originalMetadata: {
           format: result.metadataBefore.format,
           size: result.metadataBefore.size,
-          orientation: result.metadataBefore.orientation || 1
+          orientation: result.orientation
         }
       });
     } catch (processingErr) {
