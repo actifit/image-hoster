@@ -2,10 +2,11 @@ const sharp = require('sharp');
 
 //Some uploads carry EXIF that libexif rejects as corrupt, for example a
 //thumbnail pointer (tags 0x0201/0x0202) aimed past the end of the EXIF block,
-//which the Actifit Android app wrote from May 2025. libexif then drops the whole
-//directory, so sharp reports no orientation, the upload is stored unrotated, and
-//every resizer that uses libexif shows it sideways. Reading the Orientation tag
-//straight from the raw EXIF bytes avoids depending on that parser.
+//which the Actifit Android app wrote from May 2025. libexif stops reading the
+//directory at the bad entry, and those files list the thumbnail tags before
+//Orientation, so sharp reports no orientation, the upload is stored unrotated,
+//and every resizer that uses libexif shows it sideways. Reading the Orientation
+//tag straight from the raw EXIF bytes avoids depending on that parser.
 function readExifOrientation(exif) {
 	if (!Buffer.isBuffer(exif)) {
 		return undefined;
@@ -62,8 +63,9 @@ async function imageOrientation(input) {
 	return { metadata, orientation };
 }
 
-//Returns the upright image with no metadata, or null when it is already upright.
-//sharp drops all metadata on output by default, so EXIF (including GPS) goes too.
+//Returns the upright image, or null when it is already upright. sharp drops all
+//metadata on output by default, so a rotated image also loses its EXIF; an
+//image that needs no rotation is left as it was, EXIF included.
 async function uprightBuffer(input, orientation) {
 	const t = TRANSFORMS[orientation];
 	if (!t) {

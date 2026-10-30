@@ -19,12 +19,13 @@ async function baseJpeg() {
 }
 
 //Big-endian EXIF APP1 with Orientation in IFD0. `brokenThumb` adds the
-//thumbnail offset/length tags pointing far past the end of the block, as the
-//Actifit Android app wrote them.
+//thumbnail offset/length tags pointing far past the end of the block, in the
+//order the Actifit Android app wrote them: thumbnail tags first, then image
+//width/length, then Orientation (copied from a real affected upload).
 function exifApp1(orientation, brokenThumb) {
 	const entries = [];
 	if (brokenThumb) {
-		entries.push([0x0201, 4, 401], [0x0202, 4, 48807]);
+		entries.push([0x0201, 4, 401], [0x0202, 4, 48807], [0x0100, 4, 40], [0x0101, 4, 20]);
 	}
 	entries.push([0x0112, 3, orientation]);
 	const tiff = Buffer.alloc(8 + 2 + entries.length * 12 + 4);
