@@ -81,7 +81,8 @@ function exifFromJpegHeader(buf) {
 			return null; //corrupt length
 		}
 		if (marker === 0xe1 && at + 10 <= buf.length && buf.toString('latin1', at + 4, at + 10) === 'Exif\0\0') {
-			return buf.slice(at + 4, Math.min(at + 2 + length, buf.length));
+			//a partial EXIF block could hide the Orientation tag: report "unknown"
+			return at + 2 + length <= buf.length ? buf.slice(at + 4, at + 2 + length) : undefined;
 		}
 		if (marker === 0xe1 && at + 10 > buf.length) {
 			return undefined; //an APP1 segment whose type is cut off

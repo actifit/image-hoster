@@ -19,7 +19,7 @@ node scripts/fix-orientation-bucket.js --apply --keys=retry.txt                 
 - Each object is checked from its first 64 KB, or in full when its EXIF lies further in. Empty objects are counted and skipped.
 - Before an object is replaced, the original is copied to `orient-backup/<key>` in the same bucket. An existing backup is never overwritten. Delete that prefix once the result looks right.
 - A local copy in `IMG_DIR` is rewritten too.
-- `orientation-candidates.tsv` is rewritten by each dry run. `orientation-errors.txt` is rewritten by each run, so retry from a copy.
+- `orientation-candidates.tsv` is rewritten by each dry run. `orientation-errors.txt` is rewritten by each run, dry runs included, so retry from a copy.
 - If the bucket listing fails part way, the script finishes the work in progress and prints the `--start-after=KEY` to resume from.
 - `--concurrency=N` sets the number of parallel checks (default 32). Full rewrites are capped at 2 at a time.
 

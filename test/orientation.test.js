@@ -110,8 +110,11 @@ test('exifFromJpegHeader finds EXIF after other segments and in a truncated head
 	const later = Buffer.concat([jpeg.slice(0, 2), app0, jpeg.slice(2)]);
 	assert.strictEqual(readExifOrientation(exifFromJpegHeader(later)), 6);
 
-	//only the first bytes, as from a ranged download
-	assert.strictEqual(readExifOrientation(exifFromJpegHeader(later.slice(0, 120))), 6);
+	//only the first bytes, as from a ranged download: enough when the whole EXIF
+	//segment fits, "unknown" when it is cut
+	const exifEnd = 2 + app0.length + exifApp1(6, true).length;
+	assert.strictEqual(readExifOrientation(exifFromJpegHeader(later.slice(0, exifEnd))), 6);
+	assert.strictEqual(exifFromJpegHeader(later.slice(0, exifEnd - 1)), undefined);
 });
 
 test('exifFromJpegHeader returns null without EXIF or for non-JPEG input', async () => {

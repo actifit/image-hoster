@@ -21,7 +21,7 @@
 //Output files (in the current directory):
 //  orientation-candidates.tsv   dry run only: key, orientation (new each dry run)
 //  fixed-orientation.txt        appended: keys rewritten, purge these from the CDN
-//  orientation-errors.txt       new each run: keys that failed
+//  orientation-errors.txt       new each run, dry runs included: keys that failed
 
 const fs = require('fs');
 const path = require('path');
@@ -159,7 +159,9 @@ async function fixObject(key) {
 		await s3.copyObject({
 			Bucket: bucket,
 			Key: BACKUP_PREFIX + key,
-			CopySource: bucket + '/' + encodeURIComponent(key)
+			CopySource: bucket + '/' + encodeURIComponent(key),
+			//only the exact bytes judged sideways, never a copy another run already fixed
+			CopySourceIfMatch: obj.ETag
 		}).promise();
 	}
 
@@ -229,6 +231,7 @@ async function check(key) {
 			fs.appendFileSync(CANDIDATES, key + '\t' + orientation + '\n');
 			return;
 		}
+		body = exif = null; //fixObject downloads it again; don't hold it while waiting
 		await withFixSlot(() => fixObject(key));
 	} catch (err) {
 		logError(key, err);
@@ -290,7 +293,9 @@ async function main() {
 	}
 	await Promise.all(Array.from({ length: concurrency }, worker));
 	if (listError) {
-		console.error('listing stopped early (' + errorText(listError) + '). Resume with --start-after=' + lastListed);
+		const resumeFrom = lastListed || startAfter;
+		console.error('listing stopped early (' + errorText(listError) + '). ' +
+			(resumeFrom ? 'Resume with --start-after=' + resumeFrom : 'Nothing was listed; rerun the same command.'));
 		process.exitCode = 1;
 	}
 	console.log((apply ? 'done ' : 'dry run done ') + JSON.stringify(stats));
