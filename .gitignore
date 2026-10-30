@@ -149,3 +149,6 @@ loadedimgs/
 
 # Local code backups taken before deploys
 *.tar.gz
+
+# Output of scripts/fix-orientation.js
+fixed-orientation.txt
