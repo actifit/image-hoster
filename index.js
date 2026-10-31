@@ -15,6 +15,7 @@ const version = 0.1
 
 const fs = require("fs"); // Or `import fs from "fs";` with ESM
 const path = require('path');
+const crypto = require('crypto');
 const S3 = require('aws-sdk').S3;
 
 
@@ -48,8 +49,11 @@ const storage = multer.diskStorage({
 	destination: function (req, file, cb) { 
 		cb(null, path.join(__dirname, imagesDir)); 
 	}, 
+	//never the client's name: the upload is written to a hidden temporary file
+	//(safeImageName refuses a leading dot, so it is never served) and only
+	//published under its real name once it has been processed
 	filename: function (req, file, cb) { 
-		cb(null, file.originalname); 
+		cb(null, '.upload-' + crypto.randomBytes(12).toString('hex')); 
 	} 
 });
 
@@ -156,12 +160,40 @@ async function pushToBucket(filePath, key) {
 	}
 }
 
-async function fetchMeta(imgParam){
-	let input = 'loadedimgs/'+imgParam;
-	const metadata = await sharp(input).metadata();
-	console.log(metadata);
-	let inst = sharp('loadedimgs/'+imgParam).rotate().toFile('loadedimgs/'+imgParam+'_fixed');
-	return;
+//does an image with this name already exist, locally or in the bucket?
+//A failed bucket lookup counts as "exists", so an outage can never let an upload
+//replace a stored image.
+async function imageExists(name) {
+	if (fs.existsSync(path.join(__dirname, imagesDir, name))) {
+		return true;
+	}
+	if (!s3) {
+		return false;
+	}
+	try {
+		await s3.headObject({ Bucket: config.OBJ_BUCKET, Key: name }).promise();
+		return true;
+	} catch (err) {
+		if (err.code === 'NotFound' || err.code === 'NoSuchKey' || err.statusCode === 404) {
+			return false;
+		}
+		console.error('bucket lookup failed for ' + name + ':', err.message);
+		return true;
+	}
+}
+
+//publish the processed temporary file under its final name. A hard link fails
+//if that name exists, so a concurrent upload of the same name cannot replace it.
+async function publishUpload(tmpPath, finalPath) {
+	try {
+		await fs.promises.link(tmpPath, finalPath);
+		return true;
+	} catch (err) {
+		if (err.code === 'EEXIST') {
+			return false;
+		}
+		throw err;
+	}
 }
 
 
@@ -224,49 +256,65 @@ app.get('/', async function (req,res){
 })
 
 app.post('/upload', verifySecretKey, upload.single('image'), async function (req, res) { 
+	const tmpPath = req.file && req.file.path;
 	try { 
-    if (!req.file) {
-      return res.status(400).send('No file uploaded.');
-    }
+		if (!req.file) {
+			return res.status(400).send('No file uploaded.');
+		}
+		console.log('Uploaded file info:', req.file);
 
-    const savedPath = req.file.path; // full path where multer saved the file
-    console.log('Uploaded file info:', req.file);
+		//images are immutable: an upload may only add a new name, never replace one
+		const imgName = safeImageName(req.file.originalname);
+		if (!imgName) {
+			return res.status(400).json({ message: 'Invalid image name.' });
+		}
+		if (await imageExists(imgName)) {
+			return res.status(409).json({ message: 'An image with this name already exists.' });
+		}
 
-    try {
-      const result = await fixOrientationAndStripExif(savedPath);
-      console.log('fixOrientationAndStripExif result:', result);
+		let result;
+		try {
+			result = await fixOrientationAndStripExif(tmpPath);
+			console.log('fixOrientationAndStripExif result:', result);
+		} catch (processingErr) {
+			console.error('Error processing image:', processingErr);
+			return res.status(500).json({ message: 'Image uploaded but failed to process orientation/EXIF.', error: processingErr.message });
+		}
 
-      //mirror to object storage after the orientation fix, so the bucket holds
-      //the corrected image rather than the raw upload. The local copy is still
-      //written and served first, so a bucket failure only costs us the mirror.
-      const mirrored = await pushToBucket(savedPath, req.file.filename);
+		const finalPath = path.join(__dirname, imagesDir, imgName);
+		if (!(await publishUpload(tmpPath, finalPath))) {
+			return res.status(409).json({ message: 'An image with this name already exists.' });
+		}
 
-      // Send response back to client
-      return res.status(200).json({
-        message: 'Image uploaded and processed successfully!',
-        rotated: result.rotated,
-        mirrored: mirrored,
-        originalMetadata: {
-          format: result.metadataBefore.format,
-          size: result.metadataBefore.size,
-          orientation: result.orientation
-        }
-      });
-    } catch (processingErr) {
-      console.error('Error processing image:', processingErr);
-      // Optionally return success for upload but warn about processing error:
-      return res.status(500).json({ message: 'Image uploaded but failed to process orientation/EXIF.', error: processingErr.message });
-    }
+		//mirror to object storage after the orientation fix, so the bucket holds
+		//the corrected image rather than the raw upload. The local copy is
+		//served first, so a bucket failure only costs us the mirror.
+		const mirrored = await pushToBucket(finalPath, imgName);
 
-  } catch (err) { 
-    console.error('Upload error:', err);
-    res.status(500).send('An error occurred while uploading the image.');
-  }
+		return res.status(200).json({
+			message: 'Image uploaded and processed successfully!',
+			rotated: result.rotated,
+			mirrored: mirrored,
+			originalMetadata: {
+				format: result.metadataBefore.format,
+				size: result.metadataBefore.size,
+				orientation: result.orientation
+			}
+		});
+	} catch (err) { 
+		console.error('Upload error:', err);
+		res.status(500).send('An error occurred while uploading the image.');
+	} finally {
+		if (tmpPath) {
+			fs.promises.unlink(tmpPath).catch(() => {});
+		}
+	}
 });
 
-app.get('/fetchMeta/:imgParam', async function (req, res){
-	let outc = await fetchMeta(req.params.imgParam);
-	res.send('done');
+//Disabled: an unauthenticated debug route that read any path it was given and
+//wrote a "_fixed" copy next to it. Uploads are turned upright on arrival now.
+app.get('/fetchMeta/:imgParam', function (req, res){
+	return res.status(410).send({error: 'fetchMeta is no longer available'});
 })
 
 
@@ -306,6 +354,7 @@ app.get('/:imgParam', async function (req, res){
 
 	//tier 1: local disk
 	const localPath = __dirname + imagesDir + imgName;
+	res.set('X-Content-Type-Options', 'nosniff');
 	if (fs.existsSync(localPath)) {
 		res.set('Cache-Control', CACHE_CONTROL);
 		res.type(contentType);
