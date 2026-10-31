@@ -1,6 +1,10 @@
 Actifit's own image hosting server
 Handles uploads from different Actifit services
 
+## Uploads
+
+`POST /upload` (with the upload key) stores a new image. It is written to a hidden temporary file, turned upright, and only then published under its name, so a half-written or unrotated image is never served. Names must be plain (letters, digits, `.`, `_`, `-`), and an upload may only add a new name: if the name already exists locally or in object storage, the answer is `409` (re-sending the identical image gets `200`, so a retry is safe). If object storage cannot be checked, the answer is `503`. Images over 30 MB (`MAX_UPLOAD_MB`) get `413`, and files that are not images `415`. Temporary files from interrupted uploads are removed after an hour.
+
 ## Image orientation
 
 Uploads are turned upright on arrival (see `orientation.js`). An image that needs rotating is rewritten without its metadata. One that is already upright is stored as sent, EXIF included. The orientation is read from the raw EXIF bytes when sharp cannot parse the EXIF block, which happens with a broken thumbnail pointer.

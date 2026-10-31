@@ -1,10 +1,10 @@
 {
   "name": "image-hoster",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test test/orientation.test.js",
+    "test": "node --test test/orientation.test.js test/upload.test.js",
     "start": "node index.js"
   },
   "keywords": [],
