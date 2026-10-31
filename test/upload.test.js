@@ -18,18 +18,29 @@ const base = 'http://127.0.0.1:' + PORT;
 let server;
 let cwd;
 
+const STALE = '.upload-stale';
+const FRESH = '.upload-fresh';
+
 test.before(async () => {
 	fs.mkdirSync(imgDir, { recursive: true });
+	//temporary files left by aborted uploads: the old one is swept at startup
+	fs.writeFileSync(path.join(imgDir, STALE), 'x');
+	const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+	fs.utimesSync(path.join(imgDir, STALE), twoHoursAgo, twoHoursAgo);
+	fs.writeFileSync(path.join(imgDir, FRESH), 'x');
 	cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'image-hoster-'));
-	fs.writeFileSync(path.join(cwd, 'config.json'), JSON.stringify({ IMG_DIR, SEC_UPL_KEE: KEY }));
-	server = spawn(process.execPath, [path.join(ROOT, 'index.js')], { cwd, env: { ...process.env, PORT: String(PORT) }, stdio: 'ignore' });
-	for (let i = 0; i < 100; i++) {
-		try {
-			if ((await fetch(base + '/')).ok) return;
-		} catch (e) { /* not up yet */ }
-		await new Promise((r) => setTimeout(r, 100));
-	}
-	throw new Error('server did not start');
+	fs.writeFileSync(path.join(cwd, 'config.json'), JSON.stringify({ IMG_DIR, SEC_UPL_KEE: KEY, MAX_UPLOAD_MB: 1 }));
+	server = spawn(process.execPath, [path.join(ROOT, 'index.js')], { cwd, env: { ...process.env, PORT: String(PORT) }, stdio: ['ignore', 'pipe', 'inherit'] });
+	//wait for this server's own start line, so a port clash fails loudly
+	await new Promise((resolve, reject) => {
+		let out = '';
+		server.stdout.on('data', (d) => {
+			out += d;
+			if (out.includes('Server started')) resolve();
+		});
+		server.once('exit', (code) => reject(new Error('server exited with ' + code)));
+	});
+	server.stdout.resume();
 });
 
 test.after(async () => {
@@ -48,7 +59,12 @@ function upload(name, body, key = KEY) {
 	return fetch(base + '/upload', { method: 'POST', body: form, headers: { authorization: key } });
 }
 
-const leftovers = () => fs.readdirSync(imgDir).filter((f) => f.startsWith('.'));
+const leftovers = () => fs.readdirSync(imgDir).filter((f) => f.startsWith('.') && f !== FRESH);
+
+test('stale temporary files are swept at startup, recent ones kept', () => {
+	assert.ok(!fs.existsSync(path.join(imgDir, STALE)));
+	assert.ok(fs.existsSync(path.join(imgDir, FRESH)));
+});
 
 test('an upload is published under its name and served', async () => {
 	const body = await jpeg(255, 0, 0);
@@ -66,6 +82,9 @@ test('an existing image is never replaced', async () => {
 	assert.strictEqual((await upload('KEEPME', first)).status, 200);
 	const res = await upload('KEEPME', await jpeg(0, 0, 255));
 	assert.strictEqual(res.status, 409);
+	assert.deepStrictEqual(fs.readFileSync(path.join(imgDir, 'KEEPME')), first);
+	//the same image again is a retry of an upload that went through
+	assert.strictEqual((await upload('KEEPME', first)).status, 200);
 	assert.deepStrictEqual(fs.readFileSync(path.join(imgDir, 'KEEPME')), first);
 	assert.deepStrictEqual(leftovers(), []);
 });
@@ -96,8 +115,15 @@ test('a path in the uploaded name never leaves the images directory', async () =
 
 test('a file that is not an image is not published', async () => {
 	const res = await upload('NOTANIMAGE', Buffer.from('<html>hello</html>'));
-	assert.strictEqual(res.status, 500);
+	assert.strictEqual(res.status, 415);
 	assert.ok(!fs.existsSync(path.join(imgDir, 'NOTANIMAGE')));
+	assert.deepStrictEqual(leftovers(), []);
+});
+
+test('an image over the size limit is refused', async () => {
+	const res = await upload('TOOBIG', Buffer.alloc(1024 * 1024 + 1));
+	assert.strictEqual(res.status, 413);
+	assert.ok(!fs.existsSync(path.join(imgDir, 'TOOBIG')));
 	assert.deepStrictEqual(leftovers(), []);
 });
 

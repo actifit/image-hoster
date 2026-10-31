@@ -154,3 +154,6 @@ loadedimgs/
 fixed-orientation.txt
 orientation-candidates.tsv
 orientation-errors.txt
+
+# Test images directories (test/upload.test.js)
+test-uploads-*/
